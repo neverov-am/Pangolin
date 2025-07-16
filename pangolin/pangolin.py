@@ -1,12 +1,9 @@
 import argparse
 from pkg_resources import resource_filename
 from pangolin.model import *
-import vcf
 import gffutils
 import pandas as pd
 import pyfastx
-# import time
-# startTime = time.time()
 
 IN_MAP = np.asarray([[0, 0, 0, 0],
                      [1, 0, 0, 0],
@@ -99,6 +96,10 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
     elif chr not in fasta.keys() and chr[3:] in fasta.keys():
         chr = chr[3:]
 
+    if pos < 5001+d:
+        print("[Line %s]" % lnum, "WARNING, skipping variant: Could not get sequence, the variant is too close to chromosome ends. ")
+        return -1
+    # can be rewritten using pyfastx fasta.fetch(contig, interval)
     try:
         seq = fasta[chr][pos-5001-d:pos+len(ref)+4999+d].seq
     except Exception as e:
@@ -130,7 +131,7 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
         loss_neg, gain_neg = compute_score(ref_seq, alt_seq, '-', d, models)
 
     scores_list = []
-    for (genes, loss, gain) in (
+    for (genes, loss_init, gain_init) in (
         (genes_pos,loss_pos,gain_pos),(genes_neg,loss_neg,gain_neg)
     ):
         # Emit a bundle of scores/warnings per gene; join them all later
@@ -139,6 +140,8 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
             warnings = "Warnings:"
             positions = np.array(positions)
             positions = positions - (pos - d)
+            loss = loss_init.copy()
+            gain = gain_init.copy()
 
             if args.mask == "True" and len(positions) != 0:
                 positions_filt = positions[(positions>=0) & (positions<len(loss))]
@@ -232,33 +235,43 @@ def main():
             model.eval()
             models.append(model)
 
-    if variants.endswith(".vcf"):
-        lnum = 0
-        # count the number of header lines
-        for line in open(variants, 'r'):
-            lnum += 1
-            if line[0] != '#':
-                break
+    if variants.endswith(".vcf") or variants.endswith(".vcf.gz"):
 
-        variants = vcf.Reader(filename=variants)
-        variants.infos["Pangolin"] = vcf.parser._Info(
-            "Pangolin",'.',"String","Pangolin splice scores. "
-            "Format: gene|pos:score_change|pos:score_change|warnings,...",'.','.')
-        fout = vcf.Writer(open(args.output_file+".vcf", 'w'), variants)
+        vcf_in = pysam.VariantFile(variants, "r")
+        vcf_in.header.info.add(
+            "Pangolin",
+            number=".",
+            type="String",
+            description=(
+                "Pangolin splice scores. "
+                "Format: gene|pos:score_change|pos:score_change|warnings,..."
+            )
+        )
 
-        for i, variant in enumerate(variants):
-            scores = process_variant(lnum+i, str(variant.CHROM), int(variant.POS), variant.REF, str(variant.ALT[0]), gtf, models, args)
+        vcf_out = pysam.VariantFile(args.output_file, "w", header=vcf_in.header)
+ 
+        for i, variant in enumerate(vcf_in):
+            scores = process_variant(
+                i,
+                str(variant.chrom),
+                int(variant.pos),
+                variant.ref,
+                str(variant.alts[0]),
+                gtf, models, args
+            )
+
             if scores != -1:
-                variant.INFO["Pangolin"] = scores
-            fout.write_record(variant)
-            fout.flush()
+                variant.info["Pangolin"] = scores
 
-        fout.close()
+            vcf_out.write(variant)
+            # vcf_out.flush()
+
+        vcf_out.close()
 
     elif variants.endswith(".csv"):
         col_ids = args.column_ids.split(',')
         variants = pd.read_csv(variants, header=0)
-        fout = open(args.output_file+".csv", 'w')
+        fout = open(args.output_file, 'w')
         fout.write(','.join(variants.columns)+',Pangolin\n')
         fout.flush()
 
