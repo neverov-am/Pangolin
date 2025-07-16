@@ -2,6 +2,7 @@ import argparse
 from pkg_resources import resource_filename
 from pangolin.model import *
 import gffutils
+import pysam
 import pandas as pd
 import pyfastx
 
